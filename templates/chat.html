@@ -1,427 +1,236 @@
-from flask import Flask, request, jsonify, render_template_string
-from flask_cors import CORS
-from dotenv import load_dotenv
-import os
-from PyPDF2 import PdfReader
-import docx  
-import re
-import json
-import logging
-
-import faiss
-from langchain.text_splitter import CharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI  # Updated imports
-from langchain_community.vectorstores import FAISS  # Updated import
-from langchain.chains.question_answering import load_qa_chain
-from langchain.callbacks import get_openai_callback
-import pickle
-
-# Load environment variables
-load_dotenv()
-
-app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-class DocumentQASystem:
-    def __init__(self):
-        self.docsearch = None
-        self.llm = None
-        self.chain = None
-        self.text_chunks = []
-        self.embeddings = None
-        self.initialize_system()
-    
-    def read_pdf(self, file_path):
-        """Extract text from PDF file"""
-        try:
-            with open(file_path, "rb") as file:
-                pdf_reader = PdfReader(file)
-                text = ""
-                for page in pdf_reader.pages:
-                    text += page.extract_text()
-            return text
-        except Exception as e:
-            logger.error(f"Error reading PDF: {e}")
-            return ""
-
-    def clean_text(self, chunks):
-        """Clean and normalize text chunks"""
-        cleaned_chunks = []
-        for chunk in chunks:
-            # Replace sequences of 2 or more dots with a single space
-            chunk = re.sub(r"\.{2,}", " ", chunk, flags=re.UNICODE)
-            # Replace dots surrounded by spaces with a single space
-            chunk = re.sub(r"\s*\.\s*", " ", chunk, flags=re.UNICODE)
-            # Remove non-printable characters (excluding Unicode printable characters)
-            chunk = re.sub(r"[^\x20-\x7E\u0400-\u04FF]+", " ", chunk)
-            # Strip leading/trailing spaces
-            chunk = chunk.strip()
-            if chunk:  # Only add non-empty chunks
-                cleaned_chunks.append(chunk)
-        return cleaned_chunks
-
-    def initialize_system(self):
-        """Initialize the QA system with document processing"""
-        try:
-            # Read the PDF document
-            pdf_path = 'OREC/OREC_CODE_AND_RULE_BOOK.pdf'
-            if not os.path.exists(pdf_path):
-                logger.error(f"PDF file not found: {pdf_path}")
-                return False
-            
-            text = self.read_pdf(pdf_path)
-            if not text:
-                logger.error("No text extracted from PDF")
-                return False
-
-            # Split into chunks
-            char_text_splitter = CharacterTextSplitter(
-                separator="\n", 
-                chunk_size=1000, 
-                chunk_overlap=200, 
-                length_function=len
-            )
-            
-            text_chunks = char_text_splitter.split_text(text)
-            self.text_chunks = self.clean_text(text_chunks)
-            
-            if not self.text_chunks:
-                logger.error("No text chunks created")
-                return False
-
-            # Initialize embeddings and vector store
-            self.embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")  # Specify embedding model
-            self.docsearch = FAISS.from_texts(self.text_chunks, self.embeddings)
-            
-            # Initialize LLM with ChatOpenAI instead of OpenAI
-            self.llm = ChatOpenAI(
-                model="gpt-3.5-turbo",  # Use chat model instead of text-davinci-003
-                temperature=0,
-                max_tokens=500
-            )
-            self.chain = load_qa_chain(self.llm, chain_type="stuff")
-            
-            logger.info(f"System initialized with {len(self.text_chunks)} text chunks")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error initializing system: {e}")
-            return False
-
-    def is_question_relevant(self, query):
-        """Check if question is relevant to the document content"""
-        # Keywords that indicate real estate/OREC related queries
-        relevant_keywords = [
-            'broker', 'license', 'real estate', 'property', 'commission', 'disclosure',
-            'escrow', 'education', 'examination', 'regulation', 'law', 'ethics',
-            'agent', 'client', 'seller', 'buyer', 'transaction', 'fee', 'requirement',
-            'orec', 'code', 'rule', 'book', 'continuing', 'hours', 'training',
-            'application', 'renewal', 'suspension', 'revocation', 'complaint'
-        ]
-        
-        # Irrelevant keywords that should be rejected
-        irrelevant_keywords = [
-            'weather', 'sports', 'cooking', 'music', 'movie', 'celebrity',
-            'recipe', 'game', 'entertainment', 'fashion', 'travel', 'restaurant'
-        ]
-        
-        query_lower = query.lower()
-        
-        # Check for irrelevant content
-        if any(keyword in query_lower for keyword in irrelevant_keywords):
-            return False
-        
-        # Check for relevant content or general document-related terms
-        if any(keyword in query_lower for keyword in relevant_keywords):
-            return True
-        
-        # If it contains question words and seems related to regulations/requirements
-        question_indicators = ['what', 'how', 'when', 'where', 'why', 'who', 'which']
-        regulation_terms = ['required', 'must', 'shall', 'need', 'should', 'rule', 'regulation']
-        
-        has_question = any(indicator in query_lower for indicator in question_indicators)
-        has_regulation_term = any(term in query_lower for term in regulation_terms)
-        
-        return has_question and has_regulation_term
-
-    def get_answer(self, query, k=4):
-        """Get answer for a query with source tracking"""
-        try:
-            if not self.docsearch or not self.chain:
-                return {
-                    'answer': 'System not properly initialized. Please try again later.',
-                    'sources': [],
-                    'confidence': 0,
-                    'error': True
-                }
-
-            # Check if question is relevant
-            if not self.is_question_relevant(query):
-                return {
-                    'answer': 'I can only answer questions related to the OREC Code and Rule Book. Please ask about real estate regulations, licensing requirements, broker duties, or related topics.',
-                    'sources': [],
-                    'confidence': 0,
-                    'irrelevant': True
-                }
-
-            # Get similar documents
-            docs = self.docsearch.similarity_search(query, k=k)
-            
-            if not docs:
-                return {
-                    'answer': 'I could not find relevant information in the document to answer your question.',
-                    'sources': [],
-                    'confidence': 0,
-                    'no_docs': True
-                }
-
-            # Enhanced prompt for better responses
-            enhanced_query = f"""
-            Based on the OREC Code and Rule Book documents provided, please answer the following question: {query}
-            
-            Instructions:
-            - Provide a direct, comprehensive answer based only on the document content
-            - If the information is not in the documents, clearly state "I don't have information about this in the OREC Code and Rule Book"
-            - Be specific about requirements, procedures, or regulations
-            - Include relevant details like timeframes, amounts, or specific conditions
-            - Keep the response focused and professional
-            """
-
-            # Get response with cost tracking
-            with get_openai_callback() as cb:
-                response = self.chain.run(input_documents=docs, question=enhanced_query)
-                
-                logger.info(f"Query cost: {cb}")
-
-            # Check if the response indicates no information found
-            no_info_indicators = [
-                "i don't have", "not mentioned", "not specified", "not provided",
-                "cannot find", "no information", "not clear", "not stated"
-            ]
-            
-            if any(indicator in response.lower() for indicator in no_info_indicators):
-                return {
-                    'answer': 'I don\'t have specific information about that topic in the OREC Code and Rule Book. Please try rephrasing your question or ask about broker licensing, continuing education, commissions, disclosures, or escrow requirements.',
-                    'sources': [],
-                    'confidence': 0,
-                    'no_answer': True
-                }
-
-            # Calculate confidence based on response quality
-            confidence = self.calculate_confidence(response, docs)
-            
-            # Get source information
-            sources = self.get_source_info(docs)
-
-            return {
-                'answer': response.strip(),
-                'sources': sources,
-                'confidence': confidence,
-                'error': False
-            }
-
-        except Exception as e:
-            logger.error(f"Error getting answer: {e}")
-            return {
-                'answer': 'I encountered an error while processing your question. Please try again.',
-                'sources': [],
-                'confidence': 0,
-                'error': True
-            }
-
-    def calculate_confidence(self, response, docs):
-        """Calculate confidence score based on response quality"""
-        confidence = 0.5  # Base confidence
-        
-        # Increase confidence for longer, detailed responses
-        if len(response) > 100:
-            confidence += 0.2
-        if len(response) > 200:
-            confidence += 0.1
-            
-        # Increase confidence for specific numbers/requirements
-        if any(char.isdigit() for char in response):
-            confidence += 0.1
-            
-        # Increase confidence for regulatory language
-        regulatory_terms = ['must', 'shall', 'required', 'prohibited', 'minimum', 'maximum']
-        if any(term in response.lower() for term in regulatory_terms):
-            confidence += 0.1
-            
-        return min(confidence, 1.0)
-
-    def get_source_info(self, docs):
-        """Extract source information from documents"""
-        sources = []
-        for i, doc in enumerate(docs):
-            # Create mock section numbers for demo
-            # In real implementation, you'd track actual page/section numbers
-            section_num = (hash(doc.page_content) % 20) + 1
-            sources.append({
-                'section_id': section_num,
-                'content_preview': doc.page_content[:100] + "..." if len(doc.page_content) > 100 else doc.page_content
-            })
-        return sources
-
-    def get_document_sections(self):
-        """Get structured document sections for frontend display"""
-        if not self.text_chunks:
-            return []
-        
-        sections = []
-        for i, chunk in enumerate(self.text_chunks[:10]):  # Limit to first 10 for demo
-            # Extract potential titles/headers
-            lines = chunk.split('\n')
-            title = lines[0][:50] + "..." if len(lines[0]) > 50 else lines[0]
-            
-            # Clean up title
-            title = re.sub(r'^[^a-zA-Z]*', '', title).strip()
-            if not title:
-                title = f"Section {i+1}"
-            
-            sections.append({
-                'id': i + 1,
-                'title': title,
-                'content': chunk[:300] + "..." if len(chunk) > 300 else chunk
-            })
-        
-        return sections
-
-# Initialize the QA system
-qa_system = DocumentQASystem()
-
-@app.route('/')
-def index():
-    """Serve the main chat interface"""
-    # You can serve the HTML file directly or return it as a string
-    try:
-        with open('templates/chat.html', 'r') as f:
-            return f.read()
-    except FileNotFoundError:
-        # Fallback: return a simple interface
-        return '''
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>OREC Document Assistant</title>
-            <meta charset="UTF-8">
-        </head>
-        <body>
-            <h1>OREC Document Assistant</h1>
-            <p>Backend is running. Please use the proper frontend interface.</p>
-            <p>API Endpoints:</p>
-            <ul>
-                <li>POST /api/query - Submit questions</li>
-                <li>GET /api/sections - Get document sections</li>
-                <li>GET /api/health - Health check</li>
-            </ul>
-        </body>
-        </html>
-        '''
-
-@app.route('/api/health', methods=['GET'])
-def health_check():
-    """Health check endpoint"""
-    return jsonify({
-        'status': 'healthy',
-        'system_initialized': qa_system.docsearch is not None,
-        'chunks_loaded': len(qa_system.text_chunks)
-    })
-
-@app.route('/api/sections', methods=['GET'])
-def get_sections():
-    """Get document sections for frontend display"""
-    try:
-        sections = qa_system.get_document_sections()
-        return jsonify({
-            'sections': sections,
-            'total': len(sections)
-        })
-    except Exception as e:
-        logger.error(f"Error getting sections: {e}")
-        return jsonify({'error': 'Failed to load document sections'}), 500
-
-@app.route('/api/query', methods=['POST'])
-def query_document():
-    """Main endpoint for document queries"""
-    try:
-        data = request.get_json()
-        
-        if not data or 'query' not in data:
-            return jsonify({'error': 'No query provided'}), 400
-        
-        query = data['query'].strip()
-        
-        if not query:
-            return jsonify({'error': 'Empty query provided'}), 400
-        
-        # Get answer from QA system
-        result = qa_system.get_answer(query)
-        
-        # Format response
-        response = {
-            'answer': result['answer'],
-            'sources': [src['section_id'] for src in result['sources']] if result['sources'] else [],
-            'source_details': result['sources'],
-            'confidence': result['confidence'],
-            'query': query
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OREC Document Assistant</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .accordion-header {
+            cursor: pointer;
+            padding: 0.5rem;
+            background-color: #f3f4f6;
+            border-bottom: 1px solid #e5e7eb;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
         }
-        
-        # Add specific flags for different response types
-        if result.get('irrelevant'):
-            response['type'] = 'irrelevant'
-        elif result.get('no_answer'):
-            response['type'] = 'no_answer'
-        elif result.get('error'):
-            response['type'] = 'error'
-        else:
-            response['type'] = 'success'
-        
-        return jsonify(response)
-        
-    except Exception as e:
-        logger.error(f"Error processing query: {e}")
-        return jsonify({
-            'error': 'Internal server error',
-            'type': 'error'
-        }), 500
+        .accordion-content {
+            display: none;
+            padding: 0.5rem;
+            border-bottom: 1px solid #e5e7eb;
+        }
+        .accordion-content.open {
+            display: block;
+        }
+        .section-text {
+            max-height: 150px;
+            overflow-y: auto;
+            padding: 0.5rem;
+            background-color: #f9fafb;
+            border-radius: 0.25rem;
+        }
+        .highlighted {
+            background-color: #fefcbf;
+            border-left: 4px solid #f6e05e;
+        }
+        #chat-container {
+            height: 70vh;
+            overflow-y: auto;
+            padding: 1rem;
+            background-color: white;
+            border-radius: 0.5rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        .message {
+            max-width: 80%;
+            padding: 0.5rem 1rem;
+            border-radius: 0.75rem;
+            margin-bottom: 0.5rem;
+        }
+        .user-message {
+            background-color: #3b82f6;
+            color: white;
+            align-self: flex-end;
+        }
+        .llm-message {
+            background-color: #e5e7eb;
+            color: black;
+            align-self: flex-start;
+        }
+        .reference-message {
+            font-size: 0.875rem;
+            color: #4b5563;
+            align-self: flex-start;
+            margin-top: -0.25rem;
+        }
+        .input-container {
+            position: sticky;
+            bottom: 0;
+            background-color: white;
+            padding: 0.5rem;
+            border-top: 1px solid #e5e7eb;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 font-sans">
+    <div class="container mx-auto p-4 flex flex-col md:flex-row gap-4">
+        <!-- Chat Interface -->
+        <div class="w-full md:w-1/2">
+            <h1 class="text-2xl font-bold mb-4">OREC Document Assistant</h1>
+            <div id="chat-container">
+                <div class="text-gray-600 mb-2 llm-message">
+                    Ask about OREC Code and Rule Book regulations, licensing, or procedures.
+                </div>
+            </div>
+            <div class="input-container">
+                <div class="flex">
+                    <input type="text" id="query-input" class="flex-1 p-2 border rounded-l-md" placeholder="Type your question..." />
+                    <button id="send-button" class="bg-blue-500 text-white p-2 rounded-r-md">Send</button>
+                </div>
+            </div>
+        </div>
+        <!-- Sections Panel -->
+        <div class="w-full md:w-1/2">
+            <h2 class="text-xl font-bold mb-4">Document Sections</h2>
+            <div id="sections-container" class="space-y-2"></div>
+        </div>
+    </div>
 
-@app.route('/api/highlight', methods=['POST'])
-def highlight_sections():
-    """Endpoint to get specific section content for highlighting"""
-    try:
-        data = request.get_json()
-        section_ids = data.get('section_ids', [])
-        
-        highlighted_sections = []
-        for section_id in section_ids:
-            if 1 <= section_id <= len(qa_system.text_chunks):
-                chunk = qa_system.text_chunks[section_id - 1]
-                highlighted_sections.append({
-                    'id': section_id,
-                    'content': chunk,
-                    'preview': chunk[:200] + "..." if len(chunk) > 200 else chunk
-                })
-        
-        return jsonify({'highlighted_sections': highlighted_sections})
-        
-    except Exception as e:
-        logger.error(f"Error highlighting sections: {e}")
-        return jsonify({'error': 'Failed to highlight sections'}), 500
+    <script>
+        async function loadSections() {
+            try {
+                const response = await fetch('/api/sections');
+                const data = await response.json();
+                if (data.error) throw new Error(data.error);
+                renderSections(data.sections);
+            } catch (error) {
+                console.error('Error loading sections:', error);
+                document.getElementById('sections-container').innerHTML =
+                    '<p class="text-red-500">Error loading document sections.</p>';
+            }
+        }
 
-if __name__ == '__main__':
-    # Check if system is properly initialized
-    if qa_system.docsearch is None:
-        print("❌ Failed to initialize QA system. Check your PDF file and OpenAI API key.")
-        print("Make sure 'OREC/OREC_CODE_AND_RULE_BOOK.pdf' exists and OPENAI_API_KEY is set in .env")
-    else:
-        print("✅ QA System initialized successfully!")
-        print(f"📄 Loaded {len(qa_system.text_chunks)} document chunks")
-        print("🚀 Starting Flask server...")
-    
-    # Run the Flask app
-    app.run(debug=True, host='0.0.0.0', port=5000)
+        function renderSections(sections) {
+            const container = document.getElementById('sections-container');
+            container.innerHTML = '';
+            sections.forEach(chapter => {
+                const chapterDiv = document.createElement('div');
+                chapterDiv.className = 'bg-white rounded-lg shadow-md';
+                chapterDiv.innerHTML = `
+                    <div class="accordion-header" data-type="chapter" data-id="${chapter.chapterNum}">
+                        <h3 class="text-lg font-semibold">Chapter ${chapter.chapterNum}: ${chapter.title}</h3>
+                        <span class="text-gray-500">▼</span>
+                    </div>
+                    <div class="accordion-content">
+                        ${chapter.subchapters.map(subchapter => `
+                            <div class="ml-2">
+                                <div class="accordion-header" data-type="subchapter" data-id="${chapter.chapterNum}-${subchapter.subChapterNum}">
+                                    <h4 class="text-base font-medium">Subchapter ${subchapter.subChapterNum}: ${subchapter.title}</h4>
+                                    <span class="text-gray-500">▼</span>
+                                </div>
+                                <div class="accordion-content">
+                                    ${subchapter.sections.map(section => `
+                                        <div class="ml-2 mb-1">
+                                            <div class="accordion-header" data-type="section" data-id="${chapter.chapterNum}-${subchapter.subChapterNum}-${section.sectionNum}">
+                                                <h5 class="text-sm font-medium">Section ${section.sectionNum}: ${section.title}</h5>
+                                                <span class="text-gray-500">▼</span>
+                                            </div>
+                                            <div class="accordion-content section-text">${section.text}</div>
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                `;
+                container.appendChild(chapterDiv);
+            });
+
+            // Add click event listeners for accordion
+            document.querySelectorAll('.accordion-header').forEach(header => {
+                header.addEventListener('click', () => {
+                    const content = header.nextElementSibling;
+                    content.classList.toggle('open');
+                    header.querySelector('span').textContent = content.classList.contains('open') ? '▲' : '▼';
+                });
+            });
+        }
+
+        function highlightSection(chapterNum, subChapterNum, sectionNum) {
+            // Remove previous highlights
+            document.querySelectorAll('.accordion-header, .accordion-content').forEach(el => {
+                el.classList.remove('highlighted');
+            });
+
+            if (!chapterNum || !subChapterNum || !sectionNum) return;
+
+            // Find and highlight the section
+            const sectionId = `${chapterNum}-${subChapterNum}-${sectionNum}`;
+            const sectionHeader = document.querySelector(`[data-type="section"][data-id="${sectionId}"]`);
+            if (sectionHeader) {
+                // Highlight section and its parents
+                sectionHeader.classList.add('highlighted');
+                sectionHeader.nextElementSibling.classList.add('highlighted', 'open');
+                const subchapterHeader = sectionHeader.closest('.accordion-content').previousElementSibling;
+                subchapterHeader.classList.add('highlighted');
+                subchapterHeader.nextElementSibling.classList.add('open');
+                const chapterHeader = subchapterHeader.closest('.accordion-content').previousElementSibling;
+                chapterHeader.classList.add('highlighted');
+                chapterHeader.nextElementSibling.classList.add('open');
+
+                // Scroll to section
+                sectionHeader.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+        }
+
+        async function sendQuery() {
+            const input = document.getElementById('query-input');
+            const query = input.value.trim();
+            if (!query) return;
+
+            // Add user message to chat (right-aligned)
+            const chatContainer = document.getElementById('chat-container');
+            chatContainer.innerHTML += `<div class="message user-message">${query}</div>`;
+            input.value = '';
+
+            try {
+                const response = await fetch('/api/query', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query })
+                });
+                const data = await response.json();
+
+                // Add LLM response (left-aligned)
+                chatContainer.innerHTML += `<div class="message llm-message">${data.answer}</div>`;
+                if (data.source) {
+                    const { chapterNum, subChapterNum, sectionNum, title } = data.source;
+                    chatContainer.innerHTML += `<div class="reference-message">
+                        Reference: Section ${sectionNum} (${title}) in Chapter ${chapterNum}, Subchapter ${subChapterNum}
+                    </div>`;
+                    highlightSection(chapterNum, subChapterNum, sectionNum);
+                } else {
+                    chatContainer.innerHTML += `<div class="reference-message">No specific section referenced.</div>`;
+                }
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+            } catch (error) {
+                console.error('Error sending query:', error);
+                chatContainer.innerHTML += `<div class="message llm-message text-red-500">Error processing your question.</div>`;
+            }
+        }
+
+        // Event listeners
+        document.getElementById('send-button').addEventListener('click', sendQuery);
+        document.getElementById('query-input').addEventListener('keypress', e => {
+            if (e.key === 'Enter') sendQuery();
+        });
+
+        // Load sections on page load
+        window.onload = loadSections;
+    </script>
+</body>
+</html>
