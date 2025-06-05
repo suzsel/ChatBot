@@ -70,6 +70,33 @@ class DocumentQASystem:
                 cleaned_chunks.append(chunk)
         return cleaned_chunks
 
+    def format_response(self, text):
+        """Format response text for better readability"""
+        # Clean up the text
+        text = text.strip()
+
+        # Fix spacing around punctuation
+        text = re.sub(r'\s*\.\s*', '. ', text)
+        text = re.sub(r'\s*,\s*', ', ', text)
+        text = re.sub(r'\s*:\s*', ': ', text)
+        text = re.sub(r'\s*;\s*', '; ', text)
+
+        # Normalize whitespace
+        text = re.sub(r'\s+', ' ', text)
+
+        # Create paragraphs by splitting on sentence boundaries where appropriate
+        # Look for patterns that suggest new topics or sections
+        text = re.sub(r'(\. )([A-Z][a-z]+ [a-z]+ (?:include|are|must|shall|may|should|require|specify))', r'\1\n\n\2',
+                      text)
+        text = re.sub(r'(\. )([A-Z][a-z]+ (?:licensing|fees|requirements|procedures|applications))', r'\1\n\n\2', text)
+        text = re.sub(r'(\. )(The [A-Z])', r'\1\n\n\2', text)
+        text = re.sub(r'(\. )(For [a-z])', r'\1\n\n\2', text)
+
+        # Clean up any excessive spacing
+        text = re.sub(r'\n\n+', '\n\n', text)
+
+        return text.strip()
+
     def initialize_system(self):
         """Initialize the QA system with JSON data"""
         try:
@@ -136,12 +163,16 @@ class DocumentQASystem:
                     'no_docs': True
                 }
 
-            # Enhanced prompt
+            # Enhanced prompt for better formatting
             enhanced_query = f"""
-            Based on the OREC Code and Rule Book, answer: {query}
-            - Provide a direct, comprehensive answer based only on the document.
-            - If no information is available, state: "I don't have information about this."
-            - Include specific details like timeframes, amounts, or conditions.
+            Based on the OREC Code and Rule Book, provide a clear and well-structured answer to: {query}
+
+            Guidelines:
+            - Provide a direct, comprehensive answer based only on the document content
+            - Use clear, natural language with proper sentence structure
+            - Include specific details like timeframes, amounts, or conditions when available
+            - If no information is available, state: "I don't have information about this topic"
+            - Organize the response logically with smooth transitions between ideas
             """
 
             with get_openai_callback() as cb:
@@ -157,11 +188,14 @@ class DocumentQASystem:
                     'no_answer': True
                 }
 
+            # Format the response for better readability
+            formatted_response = self.format_response(response)
+
             # Get most relevant section (first document's metadata)
             source = docs[0].metadata if docs else None
 
             return {
-                'answer': response.strip(),
+                'answer': formatted_response,
                 'source': source,
                 'error': False
             }
