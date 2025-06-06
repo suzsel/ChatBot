@@ -43,8 +43,8 @@ def clean_document(json_data):
 
 # Example usage
 if __name__ == "__main__":
-    input_file = 'OREC/data.json'
-    output_file = 'OREC/cleaned_data.json'
+    input_file = 'OREC/statutes.json'
+    output_file = 'OREC/cleaned_statutes.json'
 
     try:
         # Check if input file exists

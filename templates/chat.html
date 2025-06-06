@@ -9,8 +9,8 @@
         .accordion-header {
             cursor: pointer;
             padding: 0.5rem;
-            background-color: #f3f4f6;
-            border-bottom: 1px solid #e5e7eb;
+            background-color: white;
+            border-bottom: 1px solid #dee2e6;
             display: flex;
             justify-content: space-between;
             align-items: center;
@@ -18,7 +18,7 @@
         .accordion-content {
             display: none;
             padding: 0.5rem;
-            border-bottom: 1px solid #e5e7eb;
+            border-bottom: 1px solid #dee2e6;
         }
         .accordion-content.open {
             display: block;
@@ -50,8 +50,8 @@
             padding: 0.5rem 1rem;
             border-radius: 0.75rem;
             margin-bottom: 0.5rem;
+            word-wrap: break-word;
             white-space: pre-wrap;
-            line-height: 1.5;
         }
         .user-message {
             background-color: #3b82f6;
@@ -76,19 +76,21 @@
             padding: 0.5rem;
             border-top: 1px solid #e5e7eb;
         }
-        .typing-cursor {
-            animation: blink 1s infinite;
-            color: #9ca3af;
+        .tab {
+            padding: 0.5rem 1rem;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
         }
-        @keyframes blink {
-            0%, 50% { opacity: 1; }
-            51%, 100% { opacity: 0; }
+        .tab.active {
+            border-bottom: 2px solid #3b82f6;
+            font-weight: bold;
+            color: #3b82f6;
         }
-        .message p {
-            margin-bottom: 0.75rem;
-        }
-        .message p:last-child {
-            margin-bottom: 0;
+        .initial-message {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 100%;
         }
     </style>
 </head>
@@ -98,7 +100,7 @@
         <div class="w-full md:w-1/2">
             <h1 class="text-2xl font-bold mb-4">OREC Document Assistant</h1>
             <div id="chat-container">
-                <div class="text-gray-600 mb-2 llm-message">
+                <div class="message llm-message initial-message">
                     Ask about OREC Code and Rule Book regulations, licensing, or procedures.
                 </div>
             </div>
@@ -111,24 +113,42 @@
         </div>
         <!-- Sections Panel -->
         <div class="w-full md:w-1/2">
-            <h2 class="text-xl font-bold mb-4">Document Sections</h2>
+            <h2 class="text-xl font-bold mb-2">Document Sections</h2>
+            <div class="flex mb-4">
+                <div id="statutes-tab" class="tab active">Statutes</div>
+                <div id="orec-tab" class="tab">Code and Rule Book</div>
+            </div>
             <div id="sections-container" class="space-y-2"></div>
         </div>
     </div>
 
     <script>
-        let isTyping = false;
+        let statutesSections = [];
+        let orecSections = [];
+        let activeTab = 'statutes';
 
         async function loadSections() {
             try {
-                const response = await fetch('/api/sections');
-                const data = await response.json();
-                if (data.error) throw new Error(data.error);
-                renderSections(data.sections);
+                // Load Statutes sections (clean.json)
+                const statutesResponse = await fetch('/api/statutes-sections');
+                if (!statutesResponse.ok) throw new Error(`Failed to load Statutes: ${statutesResponse.status}`);
+                const statutesData = await statutesResponse.json();
+                if (statutesData.error) throw new Error(statutesData.error);
+                statutesSections = statutesData.sections || [];
+
+                // Load OREC sections (cleaned_data.json)
+                const orecResponse = await fetch('/api/orec-sections');
+                if (!orecResponse.ok) throw new Error(`Failed to load OREC sections: ${orecResponse.status}`);
+                const orecData = await orecResponse.json();
+                if (orecData.error) throw new Error(orecData.error);
+                orecSections = orecData.sections || [];
+
+                // Render the active tab's sections
+                renderSections(activeTab === 'statutes' ? statutesSections : orecSections);
             } catch (error) {
                 console.error('Error loading sections:', error);
                 document.getElementById('sections-container').innerHTML =
-                    '<p class="text-red-500">Error loading document sections.</p>';
+                    `<p class="text-red-500">Error loading document sections: ${error.message}</p>`;
             }
         }
 
@@ -144,31 +164,45 @@
                         <span class="text-gray-500">▼</span>
                     </div>
                     <div class="accordion-content">
-                        ${chapter.subchapters.map(subchapter => `
-                            <div class="ml-2">
-                                <div class="accordion-header" data-type="subchapter" data-id="${chapter.chapterNum}-${subchapter.subChapterNum}">
-                                    <h4 class="text-base font-medium">Subchapter ${subchapter.subChapterNum}: ${subchapter.title}</h4>
-                                    <span class="text-gray-500">▼</span>
-                                </div>
-                                <div class="accordion-content">
-                                    ${subchapter.sections.map(section => `
-                                        <div class="ml-2 mb-1">
-                                            <div class="accordion-header" data-type="section" data-id="${chapter.chapterNum}-${subchapter.subChapterNum}-${section.sectionNum}">
-                                                <h5 class="text-sm font-medium">Section ${section.sectionNum}: ${section.title}</h5>
-                                                <span class="text-gray-500">▼</span>
+                        ${
+                            chapter.subchapters && chapter.subchapters.length > 0 ?
+                            chapter.subchapters.map(subchapter => `
+                                <div class="ml-2">
+                                    <div class="accordion-header" data-type="subchapter" data-id="${chapter.chapterNum}-${subchapter.subChapterNum}">
+                                        <h4 class="text-base font-medium">${subchapter.subChapterNum !== 'General' ? `Subchapter ${subchapter.subChapterNum}` : subchapter.title}</h4>
+                                        <span class="text-gray-500">▼</span>
+                                    </div>
+                                    <div class="accordion-content">
+                                        ${subchapter.sections.map(section => `
+                                            <div class="ml-2 mb-1">
+                                                <div class="accordion-header" data-type="section" data-id="${chapter.chapterNum}-${subchapter.subChapterNum}-${section.sectionNum}">
+                                                    <h5 class="text-sm font-medium">${section.sectionNum}: ${section.title}</h5>
+                                                    <span class="text-gray-500">▼</span>
+                                                </div>
+                                                <div class="accordion-content section-text">${section.text}</div>
                                             </div>
-                                            <div class="accordion-content section-text">${section.text}</div>
-                                        </div>
-                                    `).join('')}
+                                        `).join('')}
+                                    </div>
                                 </div>
-                            </div>
-                        `).join('')}
+                            `).join('')
+                            :
+                            chapter.sections && chapter.sections.length > 0 ?
+                            chapter.sections.map(section => `
+                                <div class="ml-2 mb-1">
+                                    <div class="accordion-header" data-type="section" data-id="${chapter.chapterNum}-General-${section.sectionNum}">
+                                        <h5 class="text-sm font-medium">${section.sectionNum}: ${section.title}</h5>
+                                        <span class="text-gray-500">▼</span>
+                                    </div>
+                                    <div class="accordion-content section-text">${section.text}</div>
+                                </div>
+                            `).join('')
+                            : '<p class="ml-2 text-gray-500">No sections available.</p>'
+                        }
                     </div>
                 `;
                 container.appendChild(chapterDiv);
             });
 
-            // Add click event listeners for accordion
             document.querySelectorAll('.accordion-header').forEach(header => {
                 header.addEventListener('click', () => {
                     const content = header.nextElementSibling;
@@ -178,82 +212,69 @@
             });
         }
 
-        function highlightSection(chapterNum, subChapterNum, sectionNum) {
-            // Remove previous highlights
+        function highlightSection(chapterNum, subChapterNum, sectionNum, source) {
+            if (source === 'clean' && activeTab !== 'statutes') return;
+            if (source === 'cleaned_data' && activeTab !== 'orec') return;
+
             document.querySelectorAll('.accordion-header, .accordion-content').forEach(el => {
                 el.classList.remove('highlighted');
             });
 
-            if (!chapterNum || !subChapterNum || !sectionNum) return;
+            if (!chapterNum || !sectionNum) return;
 
-            // Find and highlight the section
+            subChapterNum = subChapterNum || 'General';
             const sectionId = `${chapterNum}-${subChapterNum}-${sectionNum}`;
             const sectionHeader = document.querySelector(`[data-type="section"][data-id="${sectionId}"]`);
             if (sectionHeader) {
-                // Highlight section and its parents
                 sectionHeader.classList.add('highlighted');
                 sectionHeader.nextElementSibling.classList.add('highlighted', 'open');
-                const subchapterHeader = sectionHeader.closest('.accordion-content').previousElementSibling;
-                subchapterHeader.classList.add('highlighted');
-                subchapterHeader.nextElementSibling.classList.add('open');
-                const chapterHeader = subchapterHeader.closest('.accordion-content').previousElementSibling;
-                chapterHeader.classList.add('highlighted');
-                chapterHeader.nextElementSibling.classList.add('open');
-
-                // Scroll to section
+                const parentContent = sectionHeader.closest('.accordion-content');
+                const subchapterHeader = parentContent.previousElementSibling;
+                if (subchapterHeader.getAttribute('data-type') === 'subchapter') {
+                    subchapterHeader.classList.add('highlighted');
+                    subchapterHeader.nextElementSibling.classList.add('open');
+                    const chapterHeader = subchapterHeader.closest('.accordion-content').previousElementSibling;
+                    chapterHeader.classList.add('highlighted');
+                    chapterHeader.nextElementSibling.classList.add('open');
+                } else {
+                    const chapterHeader = parentContent.previousElementSibling;
+                    chapterHeader.classList.add('highlighted');
+                    chapterHeader.nextElementSibling.classList.add('open');
+                }
                 sectionHeader.scrollIntoView({ behavior: 'smooth', block: 'center' });
             }
         }
 
-        function formatText(text) {
-            // Clean up spacing and formatting
-            return text
-                .replace(/\s*\.\s*/g, '. ')  // Fix spacing around periods
-                .replace(/\s+/g, ' ')        // Normalize whitespace
-                .replace(/\. ([A-Z])/g, '.\n\n$1')  // New paragraph after sentences
-                .trim();
-        }
-
-        async function typeText(element, text, interval = 3) {
-            const formattedText = formatText(text);
-            let i = 0;
-            element.innerHTML = '';
-
-            return new Promise((resolve) => {
-                const timer = setInterval(() => {
-                    if (i < formattedText.length) {
-                        element.innerHTML = formattedText.slice(0, i + 1) + '<span class="typing-cursor">|</span>';
+        function typeText(element, text, speed = 3) {
+            return new Promise(resolve => {
+                let i = 0;
+                element.textContent = '';
+                const interval = setInterval(() => {
+                    if (i < text.length) {
+                        element.textContent += text.charAt(i);
                         i++;
-                        // Auto-scroll to keep message in view
-                        element.scrollIntoView({ behavior: 'smooth', block: 'end' });
+                        const chatContainer = document.getElementById('chat-container');
+                        chatContainer.scrollTop = chatContainer.scrollHeight;
                     } else {
-                        element.innerHTML = formattedText;
-                        clearInterval(timer);
+                        clearInterval(interval);
                         resolve();
                     }
-                }, interval);
+                }, speed);
             });
         }
 
         async function sendQuery() {
-            if (isTyping) return;
-
             const input = document.getElementById('query-input');
             const query = input.value.trim();
             if (!query) return;
 
-            // Add user message to chat (right-aligned)
             const chatContainer = document.getElementById('chat-container');
             chatContainer.innerHTML += `<div class="message user-message">${query}</div>`;
             input.value = '';
 
-            // Create placeholder for LLM response
-            const responseDiv = document.createElement('div');
-            responseDiv.className = 'message llm-message';
-            chatContainer.appendChild(responseDiv);
-            chatContainer.scrollTop = chatContainer.scrollHeight;
-
-            isTyping = true;
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'message llm-message';
+            chatContainer.appendChild(messageDiv);
 
             try {
                 const response = await fetch('/api/query', {
@@ -263,41 +284,73 @@
                 });
                 const data = await response.json();
 
-                // Animate the response text
-                await typeText(responseDiv, data.answer);
+                // Format the response with paragraphs and new lines
+                let formattedText = data.answer
+                    .replace(/\n\n/g, '</p><p>') // Convert double newlines to paragraph breaks
+                    .replace(/\n/g, '<br>');     // Convert single newlines to line breaks
+                if (!formattedText.startsWith('<p>')) formattedText = `<p>${formattedText}</p>`;
+                // Apply typing effect to the formatted HTML
+                await typeText(messageDiv, formattedText.replace(/<\/?p>/g, '')); // Type raw text first
+                messageDiv.innerHTML = formattedText; // Then apply HTML formatting
 
-                // Add reference after typing is complete
                 if (data.source) {
-                    const { chapterNum, subChapterNum, sectionNum, title } = data.source;
-                    const refDiv = document.createElement('div');
-                    refDiv.className = 'reference-message';
-                    refDiv.innerHTML = `Reference: Section ${sectionNum} (${title}) in Chapter ${chapterNum}, Subchapter ${subChapterNum}`;
-                    chatContainer.appendChild(refDiv);
-                    highlightSection(chapterNum, subChapterNum, sectionNum);
+                    const { chapterNum, subChapterNum, sectionNum, title, data_source } = data.source;
+                    const sourceLabel = data_source === 'clean' ? 'Statutes' : 'Code and Rule Book';
+                    const referenceDiv = document.createElement('div');
+                    referenceDiv.className = 'reference-message';
+                    referenceDiv.textContent = `Reference: ${sectionNum} (${title}) in Chapter ${chapterNum}${subChapterNum && subChapterNum !== 'General' ? `, Subchapter ${subChapterNum}` : ''} (${sourceLabel})`;
+                    chatContainer.appendChild(referenceDiv);
+                    if (data_source === 'clean' && activeTab !== 'statutes') {
+                        activeTab = 'statutes';
+                        toggleTabs();
+                    } else if (data_source === 'cleaned_data' && activeTab !== 'orec') {
+                        activeTab = 'orec';
+                        toggleTabs();
+                    }
+                    highlightSection(chapterNum, subChapterNum, sectionNum, data_source);
                 } else {
-                    const refDiv = document.createElement('div');
-                    refDiv.className = 'reference-message';
-                    refDiv.innerHTML = 'No specific section referenced.';
-                    chatContainer.appendChild(refDiv);
+                    const referenceDiv = document.createElement('div');
+                    referenceDiv.className = 'reference-message';
+                    referenceDiv.textContent = 'No specific section referenced.';
+                    chatContainer.appendChild(referenceDiv);
                 }
-
                 chatContainer.scrollTop = chatContainer.scrollHeight;
             } catch (error) {
                 console.error('Error sending query:', error);
-                responseDiv.innerHTML = 'Error processing your question.';
-                responseDiv.classList.add('text-red-500');
+                await typeText(messageDiv, 'Error processing your question.');
+                messageDiv.innerHTML = '<p>Error processing your question.</p>';
             }
-
-            isTyping = false;
         }
 
-        // Event listeners
-        document.getElementById('send-button').addEventListener('click', sendQuery);
-        document.getElementById('query-input').addEventListener('keypress', e => {
-            if (e.key === 'Enter' && !isTyping) sendQuery();
+        function toggleTabs() {
+            const statutesTab = document.getElementById('statutes-tab');
+            const orecTab = document.getElementById('orec-tab');
+            if (activeTab === 'statutes') {
+                statutesTab.classList.add('active');
+                orecTab.classList.remove('active');
+                renderSections(statutesSections);
+            } else {
+                statutesTab.classList.remove('active');
+                orecTab.classList.add('active');
+                renderSections(orecSections);
+            }
+        }
+
+        document.getElementById('statutes-tab').addEventListener('click', () => {
+            activeTab = 'statutes';
+            toggleTabs();
         });
 
-        // Load sections on page load
+        document.getElementById('orec-tab').addEventListener('click', () => {
+            activeTab = 'orec';
+            toggleTabs();
+        });
+
+        document.getElementById('send-button').addEventListener('click', sendQuery);
+        document.getElementById('query-input').addEventListener('keypress', e => {
+            if (e.key === 'Enter') sendQuery();
+        });
+
         window.onload = loadSections;
     </script>
 </body>
