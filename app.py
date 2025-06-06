@@ -80,7 +80,7 @@ class DocumentQASystem:
                     if text:
                         # Clean HTML tags from text
                         text = re.sub(r'<[^>]+>', '', text)
-                        text = re.sub(r'&Tab;', '\t', text)
+                        text = re.sub(r'	', '\t', text)
                         text = text.strip()
 
                         if text:
@@ -152,7 +152,7 @@ class DocumentQASystem:
             self.docsearch = FAISS.from_texts(self.text_chunks, self.embeddings, metadatas=self.sections_metadata)
 
             # Initialize LLM and QA chain
-            self.llm = OpenAI(model_name="gpt-3.5-turbo-instruct", temperature=0, max_tokens=500)
+            self.llm = OpenAI(model_name="gpt-4.1-nano", temperature=0, max_tokens=500)
             self.chain = load_qa_chain(self.llm, chain_type="stuff")
 
             logger.info(f"System initialized with {len(self.text_chunks)} total text chunks from both datasets")
@@ -167,7 +167,7 @@ class DocumentQASystem:
             if not self.docsearch or not self.chain:
                 return {
                     'answer': 'System not properly initialized.',
-                    'source': None,
+                    'sources': [],
                     'error': True
                 }
 
@@ -176,7 +176,7 @@ class DocumentQASystem:
             if not docs:
                 return {
                     'answer': 'No relevant information found in the document.',
-                    'source': None,
+                    'sources': [],
                     'no_docs': True
                 }
 
@@ -184,12 +184,18 @@ class DocumentQASystem:
             enhanced_query = f"""
             Based on the OREC Code and Rule Book, provide a clear and well-structured answer to: {query}
 
-            Guidelines:
-            - Provide a direct, comprehensive answer based only on the document content
+            Guidelines for formatting your response:
+            - Provide a direct, comprehensive yet concise answer based only on the document content
             - Use clear, natural language with proper sentence structure
             - Include specific details like timeframes, amounts, or conditions when available
             - If no information is available, state: "I don't have information about this topic"
             - Organize the response logically with smooth transitions between ideas
+            - Use line breaks to separate distinct sections or categories
+            - When listing requirements, fees, or steps, use numbered format (1., 2., 3.)
+            - When discussing different types or categories, start each on a new line with appropriate headers
+            - Bold key terms like 'license', 'applicants', 'requirements', 'fees', 'examination'
+            - Use proper paragraph breaks for readability
+            - Indent sub-items appropriately
             """
 
             with get_openai_callback() as cb:
@@ -201,28 +207,31 @@ class DocumentQASystem:
             if any(indicator in response.lower() for indicator in no_info_indicators):
                 return {
                     'answer': 'I don\'t have specific information about that topic in the OREC Code and Rule Book.',
-                    'source': None,
+                    'sources': [],
                     'no_answer': True
                 }
 
             # Format the response for better readability
             formatted_response = self.format_response(response)
 
-            # Get most relevant section (first document's metadata) with source info
-            source = docs[0].metadata if docs else None
-            if source:
-                source['data_source'] = source.get('source', 'unknown')
+            # Get top 3 most relevant sections with source info
+            sources = []
+            for doc in docs[:3]:  # Take the top 3 documents
+                source = doc.metadata if doc else None
+                if source:
+                    source['data_source'] = source.get('source', 'unknown')
+                    sources.append(source)
 
             return {
                 'answer': formatted_response,
-                'source': source,
+                'sources': sources,  # Return a list of sources
                 'error': False
             }
         except Exception as e:
             logger.error(f"Error getting answer: {e}")
             return {
                 'answer': 'Error processing your question.',
-                'source': None,
+                'sources': [],
                 'error': True
             }
 
@@ -272,7 +281,7 @@ class DocumentQASystem:
                         if text:
                             # Remove HTML tags
                             text = re.sub(r'<[^>]+>', '', text)
-                            text = re.sub(r'&Tab;', '\t', text)
+                            text = re.sub(r'	', '\t', text)
                             text = text.strip()
 
                         chapters[chapter_num]['subchapters'][subchapter_key]['sections'].append({
@@ -306,95 +315,188 @@ class DocumentQASystem:
         return cleaned_chunks
 
     def format_response(self, text):
-        """Format response text for better readability"""
-        # Clean up the text
+        """Format response text for better readability with improved structure and proper section headers"""
+        # Clean up the text first
         text = text.strip()
 
-        # Fix spacing around punctuation
-        text = re.sub(r'\s*\.\s*', '. ', text)
-        text = re.sub(r'\s*,\s*', ', ', text)
-        text = re.sub(r'\s*:\s*', ': ', text)
-        text = re.sub(r'\s*;\s*', '; ', text)
+        # Remove excessive whitespace but preserve intentional structure
+        text = re.sub(r'[ \t]+', ' ', text)
+        text = re.sub(r'\n[ \t]*\n', '\n\n', text)
 
-        # Normalize whitespace
-        text = re.sub(r'\s+', ' ', text)
+        # Split into sections and process each
+        sections = []
+        current_section = []
 
-        # Create paragraphs by splitting on sentence boundaries where appropriate
-        # Look for patterns that suggest new topics or sections
-        text = re.sub(r'(\. )([A-Z][a-z]+ [a-z]+ (?:include|are|must|shall|may|should|require|specify))', r'\1\n\n\2',
-                      text)
-        text = re.sub(r'(\. )([A-Z][a-z]+ (?:licensing|fees|requirements|procedures|applications))', r'\1\n\n\2', text)
-        text = re.sub(r'(\. )(The [A-Z])', r'\1\n\n\2', text)
-        text = re.sub(r'(\. )(For [a-z])', r'\1\n\n\2', text)
+        # Split by double newlines to identify natural sections
+        paragraphs = text.split('\n\n')
 
-        # Clean up any excessive spacing
-        text = re.sub(r'\n\n+', '\n\n', text)
+        for paragraph in paragraphs:
+            if not paragraph.strip():
+                continue
 
-        return text.strip()
+            paragraph = paragraph.strip()
 
+            # Check if this paragraph is a main section header
+            if self.is_section_header(paragraph):
+                # If we have content in current section, save it
+                if current_section:
+                    sections.append(self.format_section(current_section))
+                    current_section = []
 
-    def get_answer(self, query, k=4):
-        """Get answer for a query with source tracking"""
-        try:
-            if not self.docsearch or not self.chain:
-                return {
-                    'answer': 'System not properly initialized.',
-                    'source': None,
-                    'error': True
-                }
+                # Start new section with this header
+                current_section = [paragraph]
+            else:
+                # Add to current section
+                current_section.append(paragraph)
 
-            # Get similar documents
-            docs = self.docsearch.similarity_search(query, k=k)
-            if not docs:
-                return {
-                    'answer': 'No relevant information found in the document.',
-                    'source': None,
-                    'no_docs': True
-                }
+        # Don't forget the last section
+        if current_section:
+            sections.append(self.format_section(current_section))
 
-            # Enhanced prompt for better formatting
-            enhanced_query = f"""
-            Based on the OREC Code and Rule Book, provide a clear and well-structured answer to: {query}
+        # Join all sections
+        formatted_text = '\n\n'.join(sections)
 
-            Guidelines:
-            - Provide a direct, comprehensive answer based only on the document content
-            - Use clear, natural language with proper sentence structure
-            - Include specific details like timeframes, amounts, or conditions when available
-            - If no information is available, state: "I don't have information about this topic"
-            - Organize the response logically with smooth transitions between ideas
-            """
+        # Apply bold formatting to key terms
+        formatted_text = self.apply_bold_formatting(formatted_text)
 
-            with get_openai_callback() as cb:
-                response = self.chain.run(input_documents=docs, question=enhanced_query)
-                logger.info(f"Query cost: {cb}")
+        return formatted_text
 
-            # Check for no-info response
-            no_info_indicators = ["i don't have", "not mentioned", "not specified", "not provided"]
-            if any(indicator in response.lower() for indicator in no_info_indicators):
-                return {
-                    'answer': 'I don\'t have specific information about that topic in the OREC Code and Rule Book.',
-                    'source': None,
-                    'no_answer': True
-                }
+    def is_section_header(self, text):
+        """Determine if a text line is a section header"""
+        # Common patterns for section headers
+        header_patterns = [
+            r'^(Use of Registered Name|Restrictions on Advertising Content|Promotion of Incentives):?\s*$',
+            r'^(Specific Restrictions for Associates and Team Advertising):?\s*$',
+            r'^(Associates|Teams|Brokers?):?\s*$',
+            r'^(Requirements?|Fees?|Applications?|Examinations?):?\s*$',
+            r'^(For\s+\w+.*?):?\s*$',
+            r'^(\w+\s+License\s*):?\s*$',
+            r'^(\w+\s+Applicants?\s*):?\s*$',
+            r'^[A-Z][A-Za-z\s&]+:$',  # General capitalized headers ending with colon
+        ]
 
-            # Format the response for better readability
-            formatted_response = self.format_response(response)
+        for pattern in header_patterns:
+            if re.match(pattern, text, re.IGNORECASE):
+                return True
 
-            # Get most relevant section (first document's metadata)
-            source = docs[0].metadata if docs else None
+        # Check if it's a short line that looks like a header (under 50 chars, mostly caps or title case)
+        if len(text) < 50 and ':' in text:
+            words = text.replace(':', '').split()
+            if len(words) <= 6 and all(word[0].isupper() for word in words if word):
+                return True
 
-            return {
-                'answer': formatted_response,
-                'source': source,
-                'error': False
-            }
-        except Exception as e:
-            logger.error(f"Error getting answer: {e}")
-            return {
-                'answer': 'Error processing your question.',
-                'source': None,
-                'error': True
-            }
+        return False
+
+    def format_section(self, section_lines):
+        """Format a single section with proper header and content structure"""
+        if not section_lines:
+            return ""
+
+        formatted_lines = []
+        header = section_lines[0]
+        content_lines = section_lines[1:] if len(section_lines) > 1 else []
+
+        # Format the header
+        if self.is_section_header(header):
+            # Clean up header formatting
+            header = header.rstrip(':').strip()
+            formatted_lines.append(f'<div class="section-header"><h3>{header}</h3></div>')
+        else:
+            # If first line isn't a header, treat it as regular content
+            content_lines.insert(0, header)
+
+        # Process content lines
+        if content_lines:
+            formatted_content = self.format_content_lines(content_lines)
+            formatted_lines.append(formatted_content)
+
+        return '\n'.join(formatted_lines)
+
+    def format_content_lines(self, lines):
+        """Format content lines with proper paragraph and list structure"""
+        formatted_parts = []
+        current_list = []
+        list_type = None  # 'ordered' or 'unordered'
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            # Check for numbered list items
+            if re.match(r'^\d+\.\s+', line):
+                # End any previous list of different type
+                if current_list and list_type != 'ordered':
+                    formatted_parts.append(self.close_list(current_list, list_type))
+                    current_list = []
+
+                # Start or continue ordered list
+                list_type = 'ordered'
+                item_text = re.sub(r'^\d+\.\s+', '', line)
+                current_list.append(item_text)
+                continue
+
+            # Check for bullet points
+            if re.match(r'^[-•*]\s+', line):
+                # End any previous list of different type
+                if current_list and list_type != 'unordered':
+                    formatted_parts.append(self.close_list(current_list, list_type))
+                    current_list = []
+
+                # Start or continue unordered list
+                list_type = 'unordered'
+                item_text = re.sub(r'^[-•*]\s+', '', line)
+                current_list.append(item_text)
+                continue
+
+            # Regular paragraph - close any open list first
+            if current_list:
+                formatted_parts.append(self.close_list(current_list, list_type))
+                current_list = []
+                list_type = None
+
+            # Add as regular paragraph
+            formatted_parts.append(f'<p>{line}</p>')
+
+        # Close any remaining list
+        if current_list:
+            formatted_parts.append(self.close_list(current_list, list_type))
+
+        return '\n'.join(formatted_parts)
+
+    def close_list(self, items, list_type):
+        """Close a list with proper HTML tags"""
+        if not items:
+            return ""
+
+        list_items = '\n'.join([f'<li>{item}</li>' for item in items])
+
+        if list_type == 'ordered':
+            return f'<ol class="formatted-list">\n{list_items}\n</ol>'
+        else:
+            return f'<ul class="formatted-list">\n{list_items}\n</ul>'
+
+    def apply_bold_formatting(self, text):
+        """Apply bold formatting to key terms"""
+        # Convert **text** to <strong>text</strong>
+        text = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', text)
+
+        # Bold key terms if not already formatted
+        key_terms = [
+            'license', 'applicants', 'requirements', 'fees', 'examination',
+            'application', 'broker', 'associate', 'advertising', 'registered',
+            'business', 'trade name', 'franchise', 'permission', 'property',
+            'owner', 'representative', 'social networking', 'yard signs',
+            'incentives', 'seller', 'supervision', 'teams', 'approved'
+        ]
+
+        for term in key_terms:
+            # Only bold if not already in HTML tags
+            pattern = rf'\b(?<!<[^>]*>)({re.escape(term)})(?![^<]*>)\b'
+            replacement = r'<strong>\1</strong>'
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+
+        return text
 
     def get_orec_sections(self):
         """Get structured OREC Code & Rules Book sections from cleaned_data.json"""
@@ -490,11 +592,6 @@ def get_orec_sections():
         return jsonify({'error': 'Failed to load OREC document sections'}), 500
 
 
-# Remove the old routes:
-# @app.route('/api/sections', methods=['GET'])
-# @app.route('/api/embeddings-sections', methods=['GET'])
-
-
 @app.route('/api/query', methods=['POST'])
 def query_document():
     """Main endpoint for document queries"""
@@ -510,7 +607,7 @@ def query_document():
         result = qa_system.get_answer(query)
         response = {
             'answer': result['answer'],
-            'source': result['source'],
+            'sources': result['sources'],
             'type': 'success' if not result.get('error') and not result.get('no_answer') else 'no_answer' if result.get(
                 'no_answer') else 'error'
         }

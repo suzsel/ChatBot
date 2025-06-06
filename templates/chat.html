@@ -53,6 +53,20 @@
             word-wrap: break-word;
             white-space: pre-wrap;
         }
+        .message p {
+            margin: 0 0 0.5rem 0;
+        }
+        .message p:last-child {
+            margin-bottom: 0;
+        }
+        .message ul {
+            margin: 0.5rem 0;
+            padding-left: 1.5rem;
+            list-style-type: decimal;
+        }
+        .message li {
+            margin-bottom: 0.25rem;
+        }
         .user-message {
             background-color: #3b82f6;
             color: white;
@@ -68,6 +82,14 @@
             color: #4b5563;
             align-self: flex-start;
             margin-top: -0.25rem;
+        }
+        .reference-link {
+            color: #3b82f6;
+            cursor: pointer;
+            text-decoration: underline;
+        }
+        .reference-link:hover {
+            color: #1d4ed8;
         }
         .input-container {
             position: sticky;
@@ -129,21 +151,18 @@
 
         async function loadSections() {
             try {
-                // Load Statutes sections (clean.json)
                 const statutesResponse = await fetch('/api/statutes-sections');
                 if (!statutesResponse.ok) throw new Error(`Failed to load Statutes: ${statutesResponse.status}`);
                 const statutesData = await statutesResponse.json();
                 if (statutesData.error) throw new Error(statutesData.error);
                 statutesSections = statutesData.sections || [];
 
-                // Load OREC sections (cleaned_data.json)
                 const orecResponse = await fetch('/api/orec-sections');
                 if (!orecResponse.ok) throw new Error(`Failed to load OREC sections: ${orecResponse.status}`);
                 const orecData = await orecResponse.json();
                 if (orecData.error) throw new Error(orecData.error);
                 orecSections = orecData.sections || [];
 
-                // Render the active tab's sections
                 renderSections(activeTab === 'statutes' ? statutesSections : orecSections);
             } catch (error) {
                 console.error('Error loading sections:', error);
@@ -212,13 +231,21 @@
             });
         }
 
-        function highlightSection(chapterNum, subChapterNum, sectionNum, source) {
-            if (source === 'clean' && activeTab !== 'statutes') return;
-            if (source === 'cleaned_data' && activeTab !== 'orec') return;
+        function highlightSection(chapterNum, subChapterNum, sectionNum, source, clearPrevious = true) {
+            if (source === 'clean' && activeTab !== 'statutes') {
+                activeTab = 'statutes';
+                toggleTabs();
+            }
+            if (source === 'cleaned_data' && activeTab !== 'orec') {
+                activeTab = 'orec';
+                toggleTabs();
+            }
 
-            document.querySelectorAll('.accordion-header, .accordion-content').forEach(el => {
-                el.classList.remove('highlighted');
-            });
+            if (clearPrevious) {
+                document.querySelectorAll('.accordion-header, .accordion-content').forEach(el => {
+                    el.classList.remove('highlighted');
+                });
+            }
 
             if (!chapterNum || !sectionNum) return;
 
@@ -284,30 +311,35 @@
                 });
                 const data = await response.json();
 
-                // Format the response with paragraphs and new lines
-                let formattedText = data.answer
-                    .replace(/\n\n/g, '</p><p>') // Convert double newlines to paragraph breaks
-                    .replace(/\n/g, '<br>');     // Convert single newlines to line breaks
-                if (!formattedText.startsWith('<p>')) formattedText = `<p>${formattedText}</p>`;
-                // Apply typing effect to the formatted HTML
-                await typeText(messageDiv, formattedText.replace(/<\/?p>/g, '')); // Type raw text first
-                messageDiv.innerHTML = formattedText; // Then apply HTML formatting
+                // The response is already formatted with HTML tags
+                const formattedText = data.answer;
+                // For typing effect, strip HTML tags temporarily
+                const plainText = formattedText
+                    .replace(/<[^>]+>/g, '') // Remove HTML tags
+                    .replace(/&nbsp;/g, ' '); // Replace &nbsp; with space
+                await typeText(messageDiv, plainText);
+                messageDiv.innerHTML = formattedText;
 
-                if (data.source) {
-                    const { chapterNum, subChapterNum, sectionNum, title, data_source } = data.source;
-                    const sourceLabel = data_source === 'clean' ? 'Statutes' : 'Code and Rule Book';
-                    const referenceDiv = document.createElement('div');
-                    referenceDiv.className = 'reference-message';
-                    referenceDiv.textContent = `Reference: ${sectionNum} (${title}) in Chapter ${chapterNum}${subChapterNum && subChapterNum !== 'General' ? `, Subchapter ${subChapterNum}` : ''} (${sourceLabel})`;
-                    chatContainer.appendChild(referenceDiv);
-                    if (data_source === 'clean' && activeTab !== 'statutes') {
-                        activeTab = 'statutes';
-                        toggleTabs();
-                    } else if (data_source === 'cleaned_data' && activeTab !== 'orec') {
-                        activeTab = 'orec';
-                        toggleTabs();
-                    }
-                    highlightSection(chapterNum, subChapterNum, sectionNum, data_source);
+                if (data.sources && data.sources.length > 0) {
+                    data.sources.forEach((source, index) => {
+                        const { chapterNum, subChapterNum, sectionNum, title, data_source } = source;
+                        const sourceLabel = data_source === 'clean' ? 'Statutes' : 'Code and Rule Book';
+                        const referenceDiv = document.createElement('div');
+                        referenceDiv.className = 'reference-message';
+                        const referenceLink = document.createElement('a');
+                        referenceLink.className = 'reference-link';
+                        referenceLink.textContent = `Reference ${index + 1}: ${sectionNum} (${title}) in Chapter ${chapterNum}${subChapterNum && subChapterNum !== 'General' ? `, Subchapter ${subChapterNum}` : ''} (${sourceLabel})`;
+                        referenceLink.href = '#';
+                        referenceLink.setAttribute('data-chapter', chapterNum);
+                        referenceLink.setAttribute('data-subchapter', subChapterNum || 'General');
+                        referenceLink.setAttribute('data-section', sectionNum);
+                        referenceLink.setAttribute('data-source', data_source);
+                        referenceDiv.appendChild(referenceLink);
+                        chatContainer.appendChild(referenceDiv);
+
+                        // Highlight initially
+                        highlightSection(chapterNum, subChapterNum, sectionNum, data_source, index === 0);
+                    });
                 } else {
                     const referenceDiv = document.createElement('div');
                     referenceDiv.className = 'reference-message';
@@ -335,6 +367,19 @@
                 renderSections(orecSections);
             }
         }
+
+        // Event delegation for reference links
+        document.getElementById('chat-container').addEventListener('click', (e) => {
+            const link = e.target.closest('.reference-link');
+            if (link) {
+                e.preventDefault();
+                const chapterNum = link.getAttribute('data-chapter');
+                const subChapterNum = link.getAttribute('data-subchapter');
+                const sectionNum = link.getAttribute('data-section');
+                const source = link.getAttribute('data-source');
+                highlightSection(chapterNum, subChapterNum, sectionNum, source, true);
+            }
+        });
 
         document.getElementById('statutes-tab').addEventListener('click', () => {
             activeTab = 'statutes';
